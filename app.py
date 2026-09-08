@@ -224,11 +224,14 @@ def compact_terms(text: str, max_words: int = 5) -> str:
 def platform_search_url(platform: str, query: str) -> str:
     encoded = quote_plus(query)
     if platform == "tiktok":
-        return f"https://www.tiktok.com/search/video?q={encoded}"
+        web_query = quote_plus(f"site:tiktok.com/@ inurl:video {query}")
+        return f"https://www.google.com/search?q={web_query}"
     if platform == "instagram":
-        return f"https://www.instagram.com/explore/search/keyword/?q={encoded}"
+        web_query = quote_plus(f"site:instagram.com/reel {query}")
+        return f"https://www.google.com/search?q={web_query}"
     if platform == "xiaohongshu":
-        return f"https://www.xiaohongshu.com/search_result?keyword={encoded}&source=web_search_result_notes"
+        xhs_query = quote_plus(f"site:xiaohongshu.com/explore {query}")
+        return f"https://www.baidu.com/s?wd={xhs_query}"
     return f"https://www.youtube.com/results?search_query={encoded}+shorts"
 
 
