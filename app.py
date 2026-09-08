@@ -17,6 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import yt_dlp
 import edge_tts
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import quote_plus, unquote, urlparse, parse_qs
 
 ROOT = Path(__file__).parent.resolve()
 STATIC = ROOT
@@ -30,6 +33,11 @@ jobs: dict[str, dict] = {}
 class AnalyzeRequest(BaseModel):
     script: str
     results_per_scene: int = 4
+
+
+class DiscoverRequest(BaseModel):
+    script: str
+    per_platform: int = 8
 
 
 class RenderRequest(BaseModel):
@@ -121,6 +129,94 @@ def yt_search(query: str, limit: int) -> list[dict]:
             "channel": e.get("channel") or e.get("uploader") or "",
         })
     return out
+
+
+SUBTITLE_WORDS = {"자막", "字幕", "subtitles", "caption", "captions", "lyrics", "가사", "텍스트"}
+
+
+def likely_clean(title: str, description: str = "") -> bool:
+    haystack = f"{title} {description}".lower()
+    return not any(word.lower() in haystack for word in SUBTITLE_WORDS)
+
+
+def unwrap_search_url(href: str) -> str:
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if "duckduckgo.com" in parsed.netloc:
+        target = parse_qs(parsed.query).get("uddg", [""])[0]
+        return unquote(target) if target else href
+    return href
+
+
+def public_web_search(query: str, limit: int) -> list[dict]:
+    headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"}
+    response = requests.get(f"https://html.duckduckgo.com/html/?q={quote_plus(query)}", headers=headers, timeout=18)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    items = []
+    for result in soup.select(".result"):
+        link = result.select_one(".result__a")
+        if not link:
+            continue
+        url = unwrap_search_url(link.get("href", ""))
+        title = link.get_text(" ", strip=True)
+        snippet_el = result.select_one(".result__snippet")
+        snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+        if url and likely_clean(title, snippet):
+            items.append({"title": title, "url": url, "description": snippet})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def platform_results(platform: str, topic: str, limit: int) -> list[dict]:
+    config = {
+        "tiktok": ("site:tiktok.com/@ inurl:/video/", "TikTok"),
+        "instagram": ("site:instagram.com/reel/", "Instagram Reels"),
+        "xiaohongshu": ("site:xiaohongshu.com/explore/", "샤오홍슈"),
+    }
+    prefix, label = config[platform]
+    raw = public_web_search(f"{prefix} {topic}", limit * 2)
+    required = {"tiktok": "tiktok.com", "instagram": "instagram.com", "xiaohongshu": "xiaohongshu.com"}[platform]
+    results = []
+    for item in raw:
+        if required not in item["url"]:
+            continue
+        results.append({**item, "platform": platform, "platform_label": label, "duration": None, "thumbnail": None, "clean_score": 80})
+        if len(results) >= limit:
+            break
+    return results
+
+
+@app.post("/api/discover")
+def discover(req: DiscoverRequest):
+    if not req.script.strip():
+        raise HTTPException(400, "대본을 입력하세요.")
+    topic = detect_topic(req.script)
+    limit = max(3, min(req.per_platform, 12))
+    all_results = []
+    errors = {}
+    try:
+        videos = yt_search(f"{topic} shorts", limit * 3)
+        for video in videos:
+            duration = video.get("duration")
+            if duration and duration > 60:
+                continue
+            if not likely_clean(video.get("title", "")):
+                continue
+            all_results.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85})
+            if sum(1 for x in all_results if x["platform"] == "youtube") >= limit:
+                break
+    except Exception as e:
+        errors["youtube"] = str(e)
+    for platform in ("tiktok", "instagram", "xiaohongshu"):
+        try:
+            all_results.extend(platform_results(platform, topic, limit))
+        except Exception as e:
+            errors[platform] = str(e)
+    all_results.sort(key=lambda x: (x.get("clean_score", 0), x.get("duration") is not None), reverse=True)
+    return {"topic": topic, "results": all_results, "errors": errors}
 
 
 @app.post("/api/analyze")

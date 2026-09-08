@@ -1,26 +1,7 @@
-const $=s=>document.querySelector(s);
-let localUrls=[];
-
-$('#videos').onchange=()=>{
- localUrls.forEach(URL.revokeObjectURL);localUrls=[];
- const files=[...$('#videos').files];
- if(!files.length){$('#results').innerHTML='<div class="empty">휴대폰에서 영상 파일을 선택하세요.</div>';return}
- $('#results').innerHTML=files.map((f,i)=>{const u=URL.createObjectURL(f);localUrls.push(u);return `<article class="scene"><div class="sentence">${i+1}. ${esc(f.name)}</div><video src="${u}" controls playsinline preload="metadata" style="width:100%;max-height:260px;background:#000;border-radius:10px"></video></article>`}).join('');
- $('#status').textContent=`원본 영상 ${files.length}개 선택됨`;
-};
-
-$('#auto').onclick=async()=>{
- const b=$('#auto'),script=$('#script').value.trim(),files=[...$('#videos').files];
- if(!script)return alert('대본을 입력하세요.');if(!files.length)return alert('원본 영상을 한 개 이상 선택하세요.');
- b.disabled=true;$('#download').style.display='none';$('#preview').style.display='none';$('#previewEmpty').style.display='block';$('#bar').style.width='3%';$('#status').textContent=`원본 영상 ${files.length}개 업로드 중`;
- try{
-  const form=new FormData();files.forEach(f=>form.append('files',f));
-  const ur=await fetch('/api/upload',{method:'POST',body:form});const ud=await ur.json();if(!ur.ok)throw Error(ud.detail||'영상 업로드 실패');
-  $('#bar').style.width='12%';$('#status').textContent='대본 장면에 영상을 자동 배치하는 중';
-  const rr=await fetch('/api/render-uploaded',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({script,video_tokens:ud.files.map(f=>f.token),voice:$('#voice').value})});
-  const rd=await rr.json();if(!rr.ok)throw Error(rd.detail||'렌더링 시작 실패');poll(rd.job_id);
- }catch(e){$('#status').textContent=e.message;b.disabled=false}
-};
-
-async function poll(id){try{const r=await fetch('/api/jobs/'+id),d=await r.json();$('#bar').style.width=(d.progress||0)+'%';$('#status').textContent=d.message;if(d.status==='done'){const a=$('#download'),p=$('#preview');a.href=d.download;a.style.display='block';p.src=d.download;p.style.display='block';$('#previewEmpty').style.display='none';p.load();$('#auto').disabled=false;return}if(d.status==='error'){$('#auto').disabled=false;return}setTimeout(()=>poll(id),1500)}catch(e){$('#status').textContent=e.message;$('#auto').disabled=false}}
+const $=s=>document.querySelector(s);let items=[],active='all';
+$('#search').onclick=async()=>{const b=$('#search'),script=$('#script').value.trim();if(!script)return alert('대본을 입력하세요.');b.disabled=true;b.textContent='숏폼 검색 중…';$('#results').innerHTML='<div class="empty">네 플랫폼에서 짧은 영상을 찾고 있습니다.</div>';$('#status').textContent='공개 숏폼 검색 중';try{const r=await fetch('/api/discover',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({script,per_platform:8})});const d=await r.json();if(!r.ok)throw Error(d.detail||'검색 실패');items=d.results||[];active='all';filters(d.topic);draw();$('#status').textContent=`${items.length}개 후보 · 자막 없음 여부는 미리보기로 확인하세요.`}catch(e){$('#results').innerHTML=`<div class="empty">${esc(e.message)}</div>`;$('#status').textContent='검색 실패'}finally{b.disabled=false;b.textContent='짧은 영상 전체 검색'}};
+function filters(topic){const names=[['all','전체'],['youtube','YouTube'],['tiktok','TikTok'],['instagram','Reels'],['xiaohongshu','샤오홍슈']];$('#summary').innerHTML=`<p class="note">핵심 주제: ${esc(topic)}</p>`+names.map(([k,n])=>`<button class="chip ${active===k?'on':''}" data-p="${k}">${n} ${k==='all'?items.length:items.filter(x=>x.platform===k).length}</button>`).join('');document.querySelectorAll('.chip').forEach(x=>x.onclick=()=>{active=x.dataset.p;filters(topic);draw()})}
+function draw(){const list=active==='all'?items:items.filter(x=>x.platform===active);if(!list.length){$('#results').innerHTML='<div class="empty">이 플랫폼에서 찾은 영상이 없습니다.</div>';return}$('#results').innerHTML=list.map(v=>`<article class="scene result" data-url="${attr(v.url)}" data-platform="${v.platform}" data-id="${attr(v.id||'')}"><div class="badge">${esc(v.platform_label)}</div>${v.thumbnail?`<img src="${attr(v.thumbnail)}" loading="lazy">`:''}<div class="sentence">${esc(v.title)}</div><div class="query">${v.duration?`${Math.round(v.duration)}초 · `:''}자막 없음 가능성 높음</div><button class="view">미리보기</button></article>`).join('');document.querySelectorAll('.result').forEach(card=>card.querySelector('.view').onclick=()=>preview(card.dataset.url,card.dataset.platform,card.dataset.id))}
+function preview(url,platform,id){const p=$('#preview'),open=$('#open');open.href=url;open.style.display='block';$('#previewEmpty').style.display='none';p.style.display='block';if(platform==='youtube'&&id)p.src=`https://www.youtube.com/embed/${id}?playsinline=1`;else if(platform==='tiktok'){const m=url.match(/video\/(\d+)/);p.src=m?`https://www.tiktok.com/player/v1/${m[1]}`:url}else if(platform==='instagram')p.src=url.replace(/\/$/,'')+'/embed';else{p.style.display='none';$('#previewEmpty').style.display='block';$('#previewEmpty').innerHTML='샤오홍슈는 아래<br>원본 게시물에서 확인하세요.'}$('#status').textContent='영상 전체를 재생해 자막 여부를 확인하세요.'}
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function attr(s){return esc(s)}
