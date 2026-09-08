@@ -1,0 +1,16 @@
+[휴대폰만으로 온라인 배포]
+
+1. GitHub에서 shorts-video-maker라는 새 저장소를 만듭니다.
+2. 이 압축파일을 휴대폰에서 풀고 다음 항목을 저장소에 업로드합니다.
+   - app.py
+   - requirements.txt
+   - Dockerfile
+   - render.yaml
+   - static 폴더 전체
+3. Render 대시보드에서 New + > Blueprint를 선택합니다.
+4. 방금 만든 GitHub 저장소 shorts-video-maker를 선택합니다.
+5. Deploy Blueprint를 누릅니다.
+6. 배포가 완료되면 Render가 표시한 https 주소를 휴대폰에서 엽니다.
+
+프로그램은 Render 서버에서 yt-dlp, TTS, FFmpeg를 실행합니다.
+무료 서버는 쉬었다가 켜질 때 첫 접속이 느릴 수 있습니다.
