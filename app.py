@@ -152,22 +152,39 @@ def unwrap_search_url(href: str) -> str:
 
 def public_web_search(query: str, limit: int) -> list[dict]:
     headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"}
-    response = requests.get(f"https://www.bing.com/search?q={quote_plus(query)}&count={min(50, limit * 3)}", headers=headers, timeout=18)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
     items = []
-    for result in soup.select("li.b_algo"):
-        link = result.select_one("h2 a")
-        if not link:
+    engines = [
+        ("https://www.bing.com/search", {"q": query, "count": min(50, limit * 4)}, "bing"),
+        ("https://html.duckduckgo.com/html/", {"q": query}, "duck"),
+        ("https://www.google.com/search", {"q": query, "num": min(20, limit * 2)}, "google"),
+    ]
+    seen = set()
+    for endpoint, params, engine in engines:
+        try:
+            response = requests.get(endpoint, params=params, headers=headers, timeout=15)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            rows = []
+            if engine == "bing":
+                rows = [(a, a.find_parent("li")) for a in soup.select("li.b_algo h2 a")]
+            elif engine == "duck":
+                rows = [(a, a.find_parent(class_="result")) for a in soup.select("a.result__a")]
+            else:
+                rows = [(a, a.find_parent("div")) for a in soup.select("a[href]") if a.get("href", "").startswith("/url?q=")]
+            for link, row in rows:
+                href = link.get("href", "")
+                if engine == "google":
+                    href = parse_qs(urlparse(href).query).get("q", [""])[0]
+                url = unwrap_search_url(href)
+                title = link.get_text(" ", strip=True)
+                snippet = row.get_text(" ", strip=True) if row else ""
+                if url and url not in seen and title and likely_clean(title, snippet):
+                    seen.add(url)
+                    items.append({"title": title, "url": url, "description": snippet[:300]})
+                if len(items) >= limit:
+                    return items
+        except Exception:
             continue
-        url = link.get("href", "")
-        title = link.get_text(" ", strip=True)
-        snippet_el = result.select_one(".b_caption p")
-        snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-        if url and likely_clean(title, snippet):
-            items.append({"title": title, "url": url, "description": snippet})
-        if len(items) >= limit:
-            break
     return items
 
 
@@ -206,7 +223,30 @@ def translate_topic(topic: str, language: str) -> str:
         translated = "".join(part[0] for part in response.json()[0] if part and part[0])
         return translated.strip() or topic
     except Exception:
-        return topic
+        pass
+    try:
+        response = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": topic, "langpair": f"ko|{language}"},
+            timeout=8,
+        )
+        response.raise_for_status()
+        translated = response.json().get("responseData", {}).get("translatedText", "")
+        if translated and translated.casefold() != topic.casefold():
+            return translated.strip()
+    except Exception:
+        pass
+    offline = {
+        "en": {"벽지": "wallpaper", "페인트": "paint", "셀프": "DIY", "시공": "application", "얼룩": "stain", "제거": "removal", "주방": "kitchen", "정리": "organization", "청소": "cleaning"},
+        "zh-CN": {"벽지": "墙纸", "페인트": "翻新漆", "셀프": "自己动手", "시공": "施工", "얼룩": "污渍", "제거": "去除", "주방": "厨房", "정리": "收纳", "청소": "清洁"},
+        "ja": {"벽지": "壁紙", "페인트": "ペイント", "셀프": "DIY", "시공": "施工", "얼룩": "汚れ", "제거": "除去", "주방": "キッチン", "정리": "収納", "청소": "掃除"},
+        "es": {"벽지": "papel pintado", "페인트": "pintura", "셀프": "bricolaje", "시공": "aplicación", "청소": "limpieza"},
+        "pt": {"벽지": "papel de parede", "페인트": "tinta", "셀프": "faça você mesmo", "시공": "aplicação", "청소": "limpeza"},
+        "fr": {"벽지": "papier peint", "페인트": "peinture", "셀프": "DIY", "시공": "application", "청소": "nettoyage"},
+        "de": {"벽지": "Tapete", "페인트": "Farbe", "셀프": "Heimwerken", "시공": "Anwendung", "청소": "Reinigung"},
+    }
+    words = [offline.get(language, {}).get(word, word) for word in topic.split()]
+    return " ".join(words)
 
 
 def multilingual_topics(topic: str) -> list[dict]:
@@ -250,14 +290,15 @@ def discover(req: DiscoverRequest):
     if not req.script.strip():
         raise HTTPException(400, "대본을 입력하세요.")
     topic = detect_topic(req.script)
-    limit = max(10, min(req.per_platform, 15))
+    total_limit = 10
+    search_limit = 10
     translations = multilingual_topics(topic)
-    all_results = []
+    platform_groups = {"youtube": [], "tiktok": [], "instagram": [], "xiaohongshu": []}
     errors = {}
     youtube_groups = []
     for translated in translations[:4]:
         try:
-            videos = yt_search(f"{translated['query']} shorts", limit * 2)
+            videos = yt_search(f"{translated['query']} shorts", search_limit * 2)
             clean = []
             for video in videos:
                 duration = video.get("duration")
@@ -268,19 +309,29 @@ def discover(req: DiscoverRequest):
             youtube_groups.append(clean)
         except Exception as e:
             errors["youtube"] = str(e)
-    all_results.extend(merge_unique(youtube_groups, limit))
+    platform_groups["youtube"] = merge_unique(youtube_groups, search_limit)
     for platform in ("tiktok", "instagram", "xiaohongshu"):
         groups = []
         for translated in translations:
             try:
-                found = platform_results(platform, translated["query"], limit)
+                found = platform_results(platform, translated["query"], search_limit)
                 for item in found:
                     item["language"] = translated["language"]
                 groups.append(found)
             except Exception as e:
                 errors[platform] = str(e)
-        all_results.extend(merge_unique(groups, limit))
-    all_results.sort(key=lambda x: (x.get("clean_score", 0), x.get("duration") is not None), reverse=True)
+        platform_groups[platform] = merge_unique(groups, search_limit)
+    all_results = []
+    order = ("tiktok", "instagram", "xiaohongshu", "youtube")
+    for index in range(search_limit):
+        for platform in order:
+            group = platform_groups[platform]
+            if index < len(group):
+                all_results.append(group[index])
+                if len(all_results) >= total_limit:
+                    break
+        if len(all_results) >= total_limit:
+            break
     return {"topic": topic, "translations": translations, "results": all_results, "errors": errors}
 
 
