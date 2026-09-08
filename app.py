@@ -78,6 +78,8 @@ def split_script(text: str) -> list[str]:
 
 def detect_topic(script: str) -> str:
     rules = [
+        (("화장실", "줄눈"), "화장실 줄눈 시공"),
+        (("욕실", "줄눈"), "욕실 줄눈 시공"),
         (("화장실", "청소"), "화장실 청소"),
         (("욕실", "청소"), "욕실 청소"),
         (("벽지", "페인트"), "벽지 페인트 셀프 시공"),
@@ -266,10 +268,17 @@ LANGUAGES = ["ko", "en", "zh-CN", "ja", "es", "pt", "fr", "de"]
 def translate_topic(topic: str, language: str) -> str:
     if language == "ko":
         return topic
+    phrase_map = {
+        "화장실 줄눈 시공": {"en": "bathroom grout application", "zh-CN": "卫生间 美缝 施工", "ja": "トイレ 目地 施工", "es": "aplicación de lechada de baño", "pt": "aplicação de rejunte de banheiro", "fr": "application de joints de salle de bain", "de": "Badezimmer Fugen erneuern"},
+        "욕실 줄눈 시공": {"en": "bathroom grout application", "zh-CN": "浴室 美缝 施工", "ja": "浴室 目地 施工", "es": "aplicación de lechada de baño", "pt": "aplicação de rejunte de banheiro", "fr": "application de joints de salle de bain", "de": "Badezimmer Fugen erneuern"},
+        "화장실 청소": {"en": "bathroom cleaning", "zh-CN": "卫生间 清洁", "ja": "トイレ 掃除", "es": "limpieza de baño", "pt": "limpeza de banheiro", "fr": "nettoyage de salle de bain", "de": "Badezimmer reinigen"},
+    }
+    if topic in phrase_map and language in phrase_map[topic]:
+        return phrase_map[topic][language]
     try:
         response = requests.get(
             "https://translate.googleapis.com/translate_a/single",
-            params={"client": "gtx", "sl": "auto", "tl": language, "dt": "t", "q": topic},
+            params={"client": "gtx", "sl": "ko", "tl": language, "dt": "t", "q": topic},
             timeout=2,
         )
         response.raise_for_status()
@@ -332,7 +341,7 @@ def discover_platform(platform: str, translations: list[dict], limit: int) -> li
         seen = set()
         for translated in translations:
             try:
-                videos = yt_search(f'{translated["query"]} shorts', max(5, limit))
+                videos = yt_search(f'{translated["query"]} shorts', max(12, limit * 2))
             except Exception:
                 continue
             for video in videos:
