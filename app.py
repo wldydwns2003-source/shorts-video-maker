@@ -215,9 +215,9 @@ def public_web_search(query: str, limit: int) -> list[dict]:
 
 def platform_results(platform: str, topics: list[dict], limit: int) -> list[dict]:
     config = {
-        "tiktok": ("site:tiktok.com", "TikTok"),
-        "instagram": ("site:instagram.com/reel", "Instagram Reels"),
-        "xiaohongshu": ("site:xiaohongshu.com/explore", "샤오홍슈"),
+        "tiktok": ("site:tiktok.com/@ inurl:video", "TikTok"),
+        "instagram": ("site:instagram.com/reel/", "Instagram Reels"),
+        "xiaohongshu": ("site:xiaohongshu.com/explore/", "샤오홍슈"),
     }
     prefix, label = config[platform]
     required = {"tiktok": "tiktok.com", "instagram": "instagram.com", "xiaohongshu": "xiaohongshu.com"}[platform]
@@ -225,8 +225,14 @@ def platform_results(platform: str, topics: list[dict], limit: int) -> list[dict
     seen = set()
     # Search each language separately. A single giant OR query is commonly
     # ignored by search engines and was the reason non-YouTube results were 0.
-    for translated in topics:
-        raw = public_web_search(f'{prefix} "{translated["query"]}" short video', max(4, limit))
+    preferred = {
+        "tiktok": ("en", "zh-CN", "ko", "ja", "es", "pt", "fr", "de"),
+        "instagram": ("en", "es", "pt", "ko", "fr", "de", "ja", "zh-CN"),
+        "xiaohongshu": ("zh-CN", "ko", "en", "ja"),
+    }[platform]
+    ordered = sorted(topics, key=lambda item: preferred.index(item["language"]) if item["language"] in preferred else 99)
+    for translated in ordered:
+        raw = public_web_search(f'{prefix} {translated["query"]}', max(5, limit))
         for item in raw:
             url = item["url"]
             if required not in url or url in seen:
@@ -305,19 +311,24 @@ def merge_unique(groups: list[list[dict]], limit: int) -> list[dict]:
 
 
 def discover_platform(platform: str, translations: list[dict], limit: int) -> list[dict]:
-    queries = [item["query"] for item in translations]
-    combined = " OR ".join(f'"{query}"' for query in queries)
     if platform == "youtube":
-        videos = yt_search(f"({combined}) shorts", limit * 3)
         clean = []
-        for video in videos:
-            duration = video.get("duration")
-            if duration and float(duration) > 60:
+        seen = set()
+        for translated in translations:
+            try:
+                videos = yt_search(f'{translated["query"]} shorts', max(5, limit))
+            except Exception:
                 continue
-            if likely_clean(video.get("title", "")):
-                clean.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85, "language": "GLOBAL"})
-            if len(clean) >= limit:
-                break
+            for video in videos:
+                duration = video.get("duration")
+                if duration and float(duration) > 60:
+                    continue
+                if video.get("id") in seen or not likely_clean(video.get("title", "")):
+                    continue
+                seen.add(video.get("id"))
+                clean.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85, "language": translated["language"]})
+                if len(clean) >= limit:
+                    return clean
         return clean
     return platform_results(platform, translations, limit)
 
