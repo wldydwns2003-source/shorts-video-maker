@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: shorts-video-maker
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
