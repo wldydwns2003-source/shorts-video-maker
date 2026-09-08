@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -56,11 +57,41 @@ def split_script(text: str) -> list[str]:
     return [p.strip() for p in parts if len(p.strip()) >= 2][:12]
 
 
-def search_query(sentence: str) -> str:
+def detect_topic(script: str) -> str:
+    rules = [
+        (("벽지", "페인트"), "벽지 페인트 셀프 시공"),
+        (("도배", "페인트"), "벽지 페인트 셀프 시공"),
+        (("욕실", "리모델링"), "욕실 셀프 리모델링"),
+        (("주방", "정리"), "주방 정리용품"),
+        (("곰팡이",), "벽 곰팡이 제거"),
+    ]
+    for needles, topic in rules:
+        if all(n in script for n in needles):
+            return topic
+    cleaned = re.sub(r"[^0-9A-Za-z가-힣 ]", " ", script)
+    stop = {"여러분", "이거", "하나로", "진짜", "정말", "그냥", "저희", "우리", "그런데", "그리고", "하면", "해서", "있는", "있는데", "발견했어요", "더라고요", "없는데", "정보는", "남겨", "주세요"}
+    words = [w for w in cleaned.split() if 2 <= len(w) <= 12 and w not in stop and not w.isdigit()]
+    ranked = [w for w, _ in Counter(words).most_common(4)]
+    return " ".join(ranked[:3]) or "생활용품 사용법"
+
+
+def search_query(sentence: str, topic: str = "") -> str:
     cleaned = re.sub(r"[^0-9A-Za-z가-힣 ]", " ", sentence)
-    stop = {"이거", "진짜", "정말", "그냥", "하면", "해서", "있는데", "됩니다", "합니다", "그리고", "때문에", "바로"}
-    words = [w for w in cleaned.split() if len(w) > 1 and w not in stop]
-    return " ".join(words[:7]) or cleaned.strip()
+    stop = {"여러분", "이거", "하나로", "진짜", "정말", "그냥", "하면", "해서", "있는데", "됩니다", "합니다", "그리고", "그런데", "때문에", "바로", "저희", "우리", "발견했어요", "더라고요", "정보는", "남겨", "주세요"}
+    words = [w for w in cleaned.split() if 2 <= len(w) <= 12 and w not in stop and not w.isdigit()]
+    actions = []
+    action_rules = [
+        (("얼룩", "누렇게", "도배"), "누런 얼룩 제거 전후"),
+        (("바르", "쓱쓱", "섞어"), "바르는 방법 작업 과정"),
+        (("마르", "건조"), "페인트 건조 과정"),
+        (("냄새", "친환경"), "친환경 페인트 후기"),
+        (("4L", "용량", "구매"), "대용량 제품 사용 후기"),
+    ]
+    for needles, phrase in action_rules:
+        if any(n in sentence for n in needles):
+            actions.append(phrase)
+    extra = " ".join(actions[:1] or words[:3])
+    return f"{topic} {extra}".strip()
 
 
 def yt_search(query: str, limit: int) -> list[dict]:
@@ -88,15 +119,34 @@ def analyze(req: AnalyzeRequest):
     scenes = split_script(req.script)
     if not scenes:
         raise HTTPException(400, "대본을 입력하세요.")
+    topic = detect_topic(req.script)
+    try:
+        common_pool = yt_search(topic, max(8, len(scenes) * 2))
+    except Exception:
+        common_pool = []
+    used_ids: set[str] = set()
     result = []
     for i, sentence in enumerate(scenes):
-        q = search_query(sentence)
+        q = search_query(sentence, topic)
         try:
-            videos = yt_search(q, max(1, min(req.results_per_scene, 6)))
-        except Exception as e:
+            videos = yt_search(q, max(3, min(req.results_per_scene + 2, 6)))
+        except Exception:
             videos = []
-        result.append({"index": i, "sentence": sentence, "query": q, "videos": videos})
-    return {"scenes": result}
+        candidates = videos + common_pool
+        unique = []
+        seen = set()
+        for video in candidates:
+            vid = video.get("id")
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            unique.append(video)
+        fresh = [v for v in unique if v.get("id") not in used_ids]
+        chosen = (fresh or unique)[:max(1, min(req.results_per_scene, 4))]
+        if chosen:
+            used_ids.add(chosen[0]["id"])
+        result.append({"index": i, "sentence": sentence, "query": q, "videos": chosen})
+    return {"topic": topic, "scenes": result}
 
 
 def probe_duration(path: Path) -> float:
