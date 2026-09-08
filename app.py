@@ -306,8 +306,7 @@ def discover_platform(platform: str, translations: list[dict], limit: int) -> li
     return found
 
 
-@app.post("/api/discover")
-def discover(req: DiscoverRequest):
+def build_discovery(req: DiscoverRequest) -> dict:
     if not req.script.strip():
         raise HTTPException(400, "대본을 입력하세요.")
     topic = detect_topic(req.script)
@@ -336,6 +335,23 @@ def discover(req: DiscoverRequest):
         if len(all_results) >= total_limit:
             break
     return {"topic": topic, "translations": translations, "results": all_results, "errors": errors}
+
+
+def discovery_job(job_id: str, req: DiscoverRequest) -> None:
+    try:
+        jobs[job_id] = {"status": "working", "progress": 15, "message": "검색어를 여러 언어로 변환하는 중"}
+        data = build_discovery(req)
+        jobs[job_id] = {"status": "done", "progress": 100, "message": "검색 완료", "data": data}
+    except Exception as e:
+        jobs[job_id] = {"status": "error", "progress": 0, "message": str(e)}
+
+
+@app.post("/api/discover")
+def discover(req: DiscoverRequest, tasks: BackgroundTasks):
+    job_id = uuid.uuid4().hex
+    jobs[job_id] = {"status": "queued", "progress": 3, "message": "전 세계 숏폼 검색 준비 중"}
+    tasks.add_task(discovery_job, job_id, req)
+    return {"job_id": job_id}
 
 
 @app.post("/api/analyze")
