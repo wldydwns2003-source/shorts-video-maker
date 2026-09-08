@@ -398,6 +398,19 @@ def discover(req: DiscoverRequest, tasks: BackgroundTasks):
     return {"job_id": job_id}
 
 
+@app.post("/api/search-plan")
+def search_plan(req: DiscoverRequest):
+    if not req.script.strip():
+        raise HTTPException(400, "대본을 입력하세요.")
+    topic = detect_topic(req.script)
+    translations = multilingual_topics(topic)
+    shortcuts = {
+        platform: [{"language": item["language"], "query": item["query"], "url": platform_search_url(platform, item["query"])} for item in translations]
+        for platform in ("tiktok", "instagram", "xiaohongshu", "youtube")
+    }
+    return {"topic": topic, "translations": translations, "shortcuts": shortcuts}
+
+
 @app.post("/api/analyze")
 def analyze(req: AnalyzeRequest):
     scenes = split_script(req.script)
@@ -582,4 +595,3 @@ def download(job_id: str):
 
 
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
-
