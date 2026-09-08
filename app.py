@@ -161,7 +161,7 @@ def public_web_search(query: str, limit: int) -> list[dict]:
     seen = set()
     for endpoint, params, engine in engines:
         try:
-            response = requests.get(endpoint, params=params, headers=headers, timeout=15)
+            response = requests.get(endpoint, params=params, headers=headers, timeout=7)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
             rows = []
@@ -217,7 +217,7 @@ def translate_topic(topic: str, language: str) -> str:
         response = requests.get(
             "https://translate.googleapis.com/translate_a/single",
             params={"client": "gtx", "sl": "auto", "tl": language, "dt": "t", "q": topic},
-            timeout=8,
+            timeout=5,
         )
         response.raise_for_status()
         translated = "".join(part[0] for part in response.json()[0] if part and part[0])
@@ -228,7 +228,7 @@ def translate_topic(topic: str, language: str) -> str:
         response = requests.get(
             "https://api.mymemory.translated.net/get",
             params={"q": topic, "langpair": f"ko|{language}"},
-            timeout=8,
+            timeout=5,
         )
         response.raise_for_status()
         translated = response.json().get("responseData", {}).get("translatedText", "")
@@ -285,6 +285,27 @@ def merge_unique(groups: list[list[dict]], limit: int) -> list[dict]:
     return merged
 
 
+def discover_platform(platform: str, translations: list[dict], limit: int) -> list[dict]:
+    queries = [item["query"] for item in translations]
+    combined = " OR ".join(f'"{query}"' for query in queries)
+    if platform == "youtube":
+        videos = yt_search(f"({combined}) shorts", limit * 3)
+        clean = []
+        for video in videos:
+            duration = video.get("duration")
+            if duration and float(duration) > 60:
+                continue
+            if likely_clean(video.get("title", "")):
+                clean.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85, "language": "GLOBAL"})
+            if len(clean) >= limit:
+                break
+        return clean
+    found = platform_results(platform, combined, limit)
+    for item in found:
+        item["language"] = "GLOBAL"
+    return found
+
+
 @app.post("/api/discover")
 def discover(req: DiscoverRequest):
     if not req.script.strip():
@@ -295,32 +316,14 @@ def discover(req: DiscoverRequest):
     translations = multilingual_topics(topic)
     platform_groups = {"youtube": [], "tiktok": [], "instagram": [], "xiaohongshu": []}
     errors = {}
-    youtube_groups = []
-    for translated in translations[:4]:
-        try:
-            videos = yt_search(f"{translated['query']} shorts", search_limit * 2)
-            clean = []
-            for video in videos:
-                duration = video.get("duration")
-                if duration and float(duration) > 60:
-                    continue
-                if likely_clean(video.get("title", "")):
-                    clean.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85, "language": translated["language"]})
-            youtube_groups.append(clean)
-        except Exception as e:
-            errors["youtube"] = str(e)
-    platform_groups["youtube"] = merge_unique(youtube_groups, search_limit)
-    for platform in ("tiktok", "instagram", "xiaohongshu"):
-        groups = []
-        for translated in translations:
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(discover_platform, platform, translations, search_limit): platform for platform in platform_groups}
+        for future in as_completed(futures):
+            platform = futures[future]
             try:
-                found = platform_results(platform, translated["query"], search_limit)
-                for item in found:
-                    item["language"] = translated["language"]
-                groups.append(found)
+                platform_groups[platform] = future.result()
             except Exception as e:
                 errors[platform] = str(e)
-        platform_groups[platform] = merge_unique(groups, search_limit)
     all_results = []
     order = ("tiktok", "instagram", "xiaohongshu", "youtube")
     for index in range(search_limit):
