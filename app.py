@@ -8,6 +8,7 @@ import subprocess
 import threading
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated
 
@@ -151,17 +152,17 @@ def unwrap_search_url(href: str) -> str:
 
 def public_web_search(query: str, limit: int) -> list[dict]:
     headers = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"}
-    response = requests.get(f"https://html.duckduckgo.com/html/?q={quote_plus(query)}", headers=headers, timeout=18)
+    response = requests.get(f"https://www.bing.com/search?q={quote_plus(query)}&count={min(50, limit * 3)}", headers=headers, timeout=18)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     items = []
-    for result in soup.select(".result"):
-        link = result.select_one(".result__a")
+    for result in soup.select("li.b_algo"):
+        link = result.select_one("h2 a")
         if not link:
             continue
-        url = unwrap_search_url(link.get("href", ""))
+        url = link.get("href", "")
         title = link.get_text(" ", strip=True)
-        snippet_el = result.select_one(".result__snippet")
+        snippet_el = result.select_one(".b_caption p")
         snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
         if url and likely_clean(title, snippet):
             items.append({"title": title, "url": url, "description": snippet})
@@ -172,9 +173,9 @@ def public_web_search(query: str, limit: int) -> list[dict]:
 
 def platform_results(platform: str, topic: str, limit: int) -> list[dict]:
     config = {
-        "tiktok": ("site:tiktok.com/@ inurl:/video/", "TikTok"),
-        "instagram": ("site:instagram.com/reel/", "Instagram Reels"),
-        "xiaohongshu": ("site:xiaohongshu.com/explore/", "샤오홍슈"),
+        "tiktok": ("site:tiktok.com", "TikTok"),
+        "instagram": ("site:instagram.com/reel", "Instagram Reels"),
+        "xiaohongshu": ("site:xiaohongshu.com/explore", "샤오홍슈"),
     }
     prefix, label = config[platform]
     raw = public_web_search(f"{prefix} {topic}", limit * 2)
@@ -189,34 +190,98 @@ def platform_results(platform: str, topic: str, limit: int) -> list[dict]:
     return results
 
 
+LANGUAGES = ["ko", "en", "zh-CN", "ja", "es", "pt", "fr", "de"]
+
+
+def translate_topic(topic: str, language: str) -> str:
+    if language == "ko":
+        return topic
+    try:
+        response = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": language, "dt": "t", "q": topic},
+            timeout=8,
+        )
+        response.raise_for_status()
+        translated = "".join(part[0] for part in response.json()[0] if part and part[0])
+        return translated.strip() or topic
+    except Exception:
+        return topic
+
+
+def multilingual_topics(topic: str) -> list[dict]:
+    translated = {"ko": topic}
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        futures = {pool.submit(translate_topic, topic, lang): lang for lang in LANGUAGES[1:]}
+        for future in as_completed(futures):
+            lang = futures[future]
+            try:
+                translated[lang] = future.result()
+            except Exception:
+                translated[lang] = topic
+    unique = []
+    seen = set()
+    for lang in LANGUAGES:
+        text = translated.get(lang, topic).strip()
+        key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            unique.append({"language": lang, "query": text})
+    return unique
+
+
+def merge_unique(groups: list[list[dict]], limit: int) -> list[dict]:
+    merged = []
+    seen = set()
+    for group in groups:
+        for item in group:
+            url = item.get("url", "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 @app.post("/api/discover")
 def discover(req: DiscoverRequest):
     if not req.script.strip():
         raise HTTPException(400, "대본을 입력하세요.")
     topic = detect_topic(req.script)
-    limit = max(3, min(req.per_platform, 12))
+    limit = max(10, min(req.per_platform, 15))
+    translations = multilingual_topics(topic)
     all_results = []
     errors = {}
-    try:
-        videos = yt_search(f"{topic} shorts", limit * 3)
-        for video in videos:
-            duration = video.get("duration")
-            if duration and duration > 60:
-                continue
-            if not likely_clean(video.get("title", "")):
-                continue
-            all_results.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85})
-            if sum(1 for x in all_results if x["platform"] == "youtube") >= limit:
-                break
-    except Exception as e:
-        errors["youtube"] = str(e)
-    for platform in ("tiktok", "instagram", "xiaohongshu"):
+    youtube_groups = []
+    for translated in translations[:4]:
         try:
-            all_results.extend(platform_results(platform, topic, limit))
+            videos = yt_search(f"{translated['query']} shorts", limit * 2)
+            clean = []
+            for video in videos:
+                duration = video.get("duration")
+                if duration and float(duration) > 60:
+                    continue
+                if likely_clean(video.get("title", "")):
+                    clean.append({**video, "platform": "youtube", "platform_label": "YouTube Shorts", "clean_score": 85, "language": translated["language"]})
+            youtube_groups.append(clean)
         except Exception as e:
-            errors[platform] = str(e)
+            errors["youtube"] = str(e)
+    all_results.extend(merge_unique(youtube_groups, limit))
+    for platform in ("tiktok", "instagram", "xiaohongshu"):
+        groups = []
+        for translated in translations:
+            try:
+                found = platform_results(platform, translated["query"], limit)
+                for item in found:
+                    item["language"] = translated["language"]
+                groups.append(found)
+            except Exception as e:
+                errors[platform] = str(e)
+        all_results.extend(merge_unique(groups, limit))
     all_results.sort(key=lambda x: (x.get("clean_score", 0), x.get("duration") is not None), reverse=True)
-    return {"topic": topic, "results": all_results, "errors": errors}
+    return {"topic": topic, "translations": translations, "results": all_results, "errors": errors}
 
 
 @app.post("/api/analyze")
