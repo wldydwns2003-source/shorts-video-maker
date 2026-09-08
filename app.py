@@ -144,9 +144,12 @@ def render_job(job_id: str, req: RenderRequest) -> None:
             jobs[job_id] = {"status": "working", "progress": 8 + int(50 * i / len(selected)), "message": f"영상 {i+1}/{len(selected)} 다운로드 중"}
             src = download_video(scene["url"], folder / f"source-{i}")
             clip_len = max(1.5, total * weight / weight_sum)
+            source_len = probe_duration(src)
+            available = max(0.0, source_len - clip_len)
+            start = min(available, available * ((i * 37) % 100) / 100)
             clip = folder / f"clip-{i}.mp4"
             vf = f"scale={req.width}:{req.height}:force_original_aspect_ratio=increase,crop={req.width}:{req.height},fps=30,setsar=1"
-            run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src), "-t", f"{clip_len:.3f}", "-an", "-vf", vf,
+            run(["ffmpeg", "-y", "-ss", f"{start:.3f}", "-stream_loop", "-1", "-i", str(src), "-t", f"{clip_len:.3f}", "-an", "-vf", vf,
                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(clip)])
             clips.append(clip)
         concat = folder / "concat.txt"
@@ -186,4 +189,3 @@ def download(job_id: str):
 
 
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
-
