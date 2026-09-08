@@ -1,5 +1,26 @@
-const $=s=>document.querySelector(s);let scenes=[];
-$('#auto').onclick=async()=>{const b=$('#auto'),script=$('#script').value.trim();if(!script)return alert('대본을 입력하세요.');b.disabled=true;$('#download').style.display='none';$('#preview').style.display='none';$('#previewEmpty').style.display='block';$('#bar').style.width='3%';$('#status').textContent='대본을 장면별로 분석하는 중';$('#results').innerHTML='<div class="empty">대본에 맞는 실제 영상을 자동 검색하고 있습니다.</div>';try{const r=await fetch('/api/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({script,results_per_scene:1})});const d=await r.json();if(!r.ok)throw Error(d.detail||'영상 검색 실패');scenes=d.scenes.map(s=>({...s,selected:s.videos.length?0:null}));draw();const chosen=scenes.filter(s=>s.selected!==null).map(s=>({sentence:s.sentence,url:s.videos[0].url,title:s.videos[0].title}));if(!chosen.length)throw Error('대본에 맞는 영상을 찾지 못했습니다.');$('#bar').style.width='10%';$('#status').textContent=`${chosen.length}개 장면 자동 선택 완료 · 영상 자르기 시작`;const rr=await fetch('/api/render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({script,scenes:chosen,voice:$('#voice').value})});const rd=await rr.json();if(!rr.ok)throw Error(rd.detail||'렌더링 시작 실패');poll(rd.job_id)}catch(e){$('#status').textContent=e.message;b.disabled=false}};
-function draw(){$('#results').innerHTML=scenes.map((s,i)=>{const v=s.videos[0];return `<article class="scene"><div class="sentence">${i+1}. ${esc(s.sentence)}</div><div class="query">자동 검색어: ${esc(s.query)}</div>${v?`<div class="video selected"><img src="${v.thumbnail}" loading="lazy"><p>${esc(v.title)}</p></div>`:'<div class="note">영상 없음</div>'}</article>`}).join('')}
+const $=s=>document.querySelector(s);
+let localUrls=[];
+
+$('#videos').onchange=()=>{
+ localUrls.forEach(URL.revokeObjectURL);localUrls=[];
+ const files=[...$('#videos').files];
+ if(!files.length){$('#results').innerHTML='<div class="empty">휴대폰에서 영상 파일을 선택하세요.</div>';return}
+ $('#results').innerHTML=files.map((f,i)=>{const u=URL.createObjectURL(f);localUrls.push(u);return `<article class="scene"><div class="sentence">${i+1}. ${esc(f.name)}</div><video src="${u}" controls playsinline preload="metadata" style="width:100%;max-height:260px;background:#000;border-radius:10px"></video></article>`}).join('');
+ $('#status').textContent=`원본 영상 ${files.length}개 선택됨`;
+};
+
+$('#auto').onclick=async()=>{
+ const b=$('#auto'),script=$('#script').value.trim(),files=[...$('#videos').files];
+ if(!script)return alert('대본을 입력하세요.');if(!files.length)return alert('원본 영상을 한 개 이상 선택하세요.');
+ b.disabled=true;$('#download').style.display='none';$('#preview').style.display='none';$('#previewEmpty').style.display='block';$('#bar').style.width='3%';$('#status').textContent=`원본 영상 ${files.length}개 업로드 중`;
+ try{
+  const form=new FormData();files.forEach(f=>form.append('files',f));
+  const ur=await fetch('/api/upload',{method:'POST',body:form});const ud=await ur.json();if(!ur.ok)throw Error(ud.detail||'영상 업로드 실패');
+  $('#bar').style.width='12%';$('#status').textContent='대본 장면에 영상을 자동 배치하는 중';
+  const rr=await fetch('/api/render-uploaded',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({script,video_tokens:ud.files.map(f=>f.token),voice:$('#voice').value})});
+  const rd=await rr.json();if(!rr.ok)throw Error(rd.detail||'렌더링 시작 실패');poll(rd.job_id);
+ }catch(e){$('#status').textContent=e.message;b.disabled=false}
+};
+
 async function poll(id){try{const r=await fetch('/api/jobs/'+id),d=await r.json();$('#bar').style.width=(d.progress||0)+'%';$('#status').textContent=d.message;if(d.status==='done'){const a=$('#download'),p=$('#preview');a.href=d.download;a.style.display='block';p.src=d.download;p.style.display='block';$('#previewEmpty').style.display='none';p.load();$('#auto').disabled=false;return}if(d.status==='error'){$('#auto').disabled=false;return}setTimeout(()=>poll(id),1500)}catch(e){$('#status').textContent=e.message;$('#auto').disabled=false}}
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}

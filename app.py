@@ -9,8 +9,9 @@ import threading
 import uuid
 from collections import Counter
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -34,6 +35,14 @@ class AnalyzeRequest(BaseModel):
 class RenderRequest(BaseModel):
     script: str
     scenes: list[dict]
+    voice: str = "ko-KR-SunHiNeural"
+    width: int = 1080
+    height: int = 1920
+
+
+class UploadedRenderRequest(BaseModel):
+    script: str
+    video_tokens: list[str]
     voice: str = "ko-KR-SunHiNeural"
     width: int = 1080
     height: int = 1920
@@ -175,6 +184,50 @@ async def create_tts(text: str, voice: str, out: Path) -> None:
     await edge_tts.Communicate(text, voice).save(str(out))
 
 
+def uploaded_video_path(token: str) -> Path:
+    parts = token.split("/", 1)
+    if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{32}", parts[0]):
+        raise RuntimeError("업로드 영상 정보가 올바르지 않습니다.")
+    path = (WORK / "uploads" / parts[0] / Path(parts[1]).name).resolve()
+    upload_root = (WORK / "uploads").resolve()
+    if upload_root not in path.parents or not path.exists():
+        raise RuntimeError("업로드한 영상을 찾을 수 없습니다.")
+    return path
+
+
+@app.post("/api/upload")
+async def upload_videos(files: Annotated[list[UploadFile], File()]):
+    if not files:
+        raise HTTPException(400, "영상 파일을 선택하세요.")
+    batch = uuid.uuid4().hex
+    folder = WORK / "uploads" / batch
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = []
+    allowed = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+    for i, item in enumerate(files[:20]):
+        suffix = Path(item.filename or "").suffix.lower()
+        if suffix not in allowed:
+            continue
+        name = f"video-{i}{suffix}"
+        target = folder / name
+        with target.open("wb") as out:
+            shutil.copyfileobj(item.file, out)
+        token = f"{batch}/{name}"
+        saved.append({"token": token, "name": item.filename or name, "preview": f"/api/uploads/{token}"})
+    if not saved:
+        raise HTTPException(400, "지원되는 영상 파일이 없습니다.")
+    return {"files": saved}
+
+
+@app.get("/api/uploads/{batch}/{filename}")
+def preview_upload(batch: str, filename: str):
+    try:
+        path = uploaded_video_path(f"{batch}/{filename}")
+    except RuntimeError as e:
+        raise HTTPException(404, str(e))
+    return FileResponse(path, media_type="video/mp4")
+
+
 def render_job(job_id: str, req: RenderRequest) -> None:
     folder = WORK / job_id
     folder.mkdir(parents=True, exist_ok=True)
@@ -184,7 +237,7 @@ def render_job(job_id: str, req: RenderRequest) -> None:
         audio = folder / "tts.mp3"
         asyncio.run(create_tts(req.script, req.voice, audio))
         total = probe_duration(audio)
-        selected = [s for s in req.scenes if s.get("url")]
+        selected = [s for s in req.scenes if s.get("url") or s.get("token")]
         if not selected:
             raise RuntimeError("선택된 영상이 없습니다.")
         weights = [max(1, len(s.get("sentence", ""))) for s in selected]
@@ -192,7 +245,7 @@ def render_job(job_id: str, req: RenderRequest) -> None:
         clips = []
         for i, (scene, weight) in enumerate(zip(selected, weights)):
             jobs[job_id] = {"status": "working", "progress": 8 + int(50 * i / len(selected)), "message": f"영상 {i+1}/{len(selected)} 다운로드 중"}
-            src = download_video(scene["url"], folder / f"source-{i}")
+            src = uploaded_video_path(scene["token"]) if scene.get("token") else download_video(scene["url"], folder / f"source-{i}")
             clip_len = max(1.5, total * weight / weight_sum)
             source_len = probe_duration(src)
             available = max(0.0, source_len - clip_len)
@@ -221,6 +274,21 @@ def render(req: RenderRequest, tasks: BackgroundTasks):
     jobs[job_id] = {"status": "queued", "progress": 0, "message": "준비 중"}
     tasks.add_task(render_job, job_id, req)
     return {"job_id": job_id}
+
+
+@app.post("/api/render-uploaded")
+def render_uploaded(req: UploadedRenderRequest, tasks: BackgroundTasks):
+    sentences = split_script(req.script)
+    if not sentences:
+        raise HTTPException(400, "대본을 입력하세요.")
+    if not req.video_tokens:
+        raise HTTPException(400, "영상 파일을 선택하세요.")
+    scenes = [{"sentence": sentence, "token": req.video_tokens[i % len(req.video_tokens)]} for i, sentence in enumerate(sentences)]
+    render_req = RenderRequest(script=req.script, scenes=scenes, voice=req.voice, width=req.width, height=req.height)
+    job_id = uuid.uuid4().hex
+    jobs[job_id] = {"status": "queued", "progress": 0, "message": "업로드 영상을 분석하는 중"}
+    tasks.add_task(render_job, job_id, render_req)
+    return {"job_id": job_id, "scene_count": len(scenes)}
 
 
 @app.get("/api/jobs/{job_id}")
