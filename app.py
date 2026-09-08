@@ -213,36 +213,52 @@ def public_web_search(query: str, limit: int) -> list[dict]:
     return items
 
 
+def compact_terms(text: str, max_words: int = 5) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z가-힣一-龥ぁ-んァ-ンÀ-ž ]", " ", text)
+    words = [word for word in cleaned.split() if len(word) > 1]
+    return " ".join(words[:max_words]) or text.strip()
+
+
+def platform_search_url(platform: str, query: str) -> str:
+    encoded = quote_plus(query)
+    if platform == "tiktok":
+        return f"https://www.tiktok.com/search/video?q={encoded}"
+    if platform == "instagram":
+        return f"https://www.instagram.com/explore/search/keyword/?q={encoded}"
+    if platform == "xiaohongshu":
+        return f"https://www.xiaohongshu.com/search_result?keyword={encoded}&source=web_search_result_notes"
+    return f"https://www.youtube.com/results?search_query={encoded}+shorts"
+
+
 def platform_results(platform: str, topics: list[dict], limit: int) -> list[dict]:
     config = {
-        "tiktok": ("site:tiktok.com/@ inurl:video", "TikTok"),
-        "instagram": ("site:instagram.com/reel/", "Instagram Reels"),
-        "xiaohongshu": ("site:xiaohongshu.com/explore/", "샤오홍슈"),
+        "tiktok": (["site:tiktok.com/@/video/", "site:tiktok.com video"], "TikTok", ("tiktok.com",)),
+        "instagram": (["site:instagram.com/reel/", "site:instagram.com/reels/"], "Instagram Reels", ("instagram.com",)),
+        "xiaohongshu": (["site:xiaohongshu.com/explore/", "site:xiaohongshu.com/discovery/item/"], "샤오홍슈", ("xiaohongshu.com", "xhslink.com")),
     }
-    prefix, label = config[platform]
-    required = {"tiktok": "tiktok.com", "instagram": "instagram.com", "xiaohongshu": "xiaohongshu.com"}[platform]
-    results = []
-    seen = set()
-    # Search each language separately. A single giant OR query is commonly
-    # ignored by search engines and was the reason non-YouTube results were 0.
-    preferred = {
-        "tiktok": ("en", "zh-CN", "ko", "ja", "es", "pt", "fr", "de"),
-        "instagram": ("en", "es", "pt", "ko", "fr", "de", "ja", "zh-CN"),
-        "xiaohongshu": ("zh-CN", "ko", "en", "ja"),
-    }[platform]
+    prefixes, label, hosts = config[platform]
+    results, seen, queries = [], set(), []
+    preferred = {"tiktok": ("en", "zh-CN", "ko", "ja", "es", "pt", "fr", "de"), "instagram": ("en", "es", "pt", "ko", "fr", "de", "ja", "zh-CN"), "xiaohongshu": ("zh-CN", "ko", "en", "ja", "es", "pt", "fr", "de")}[platform]
     ordered = sorted(topics, key=lambda item: preferred.index(item["language"]) if item["language"] in preferred else 99)
     for translated in ordered:
-        raw = public_web_search(f'{prefix} {translated["query"]}', max(5, limit))
-        for item in raw:
+        terms = compact_terms(translated["query"])
+        for prefix in prefixes:
+            for variant in (terms, " ".join(terms.split()[:3])):
+                query = f"{prefix} {variant}".strip()
+                if query not in queries:
+                    queries.append(query)
+    for query in queries[:24]:
+        for item in public_web_search(query, max(6, limit * 2)):
             url = item["url"]
-            if required not in url or url in seen:
+            host = urlparse(url).netloc.lower()
+            valid_path = (platform == "tiktok" and "/video/" in url) or (platform == "instagram" and ("/reel/" in url or "/reels/" in url)) or (platform == "xiaohongshu" and ("/explore/" in url or "/discovery/item/" in url))
+            if not valid_path or not any(domain in host for domain in hosts) or url in seen:
                 continue
             seen.add(url)
-            results.append({**item, "platform": platform, "platform_label": label, "duration": None, "thumbnail": None, "clean_score": 80, "language": translated["language"]})
+            results.append({**item, "platform": platform, "platform_label": label, "duration": None, "thumbnail": None, "clean_score": 80, "language": next((t["language"] for t in ordered if compact_terms(t["query"]) in query), "")})
             if len(results) >= limit:
                 return results
     return results
-
 
 LANGUAGES = ["ko", "en", "zh-CN", "ja", "es", "pt", "fr", "de"]
 
@@ -361,7 +377,8 @@ def build_discovery(req: DiscoverRequest) -> dict:
                     break
         if len(all_results) >= total_limit:
             break
-    return {"topic": topic, "translations": translations, "results": all_results, "errors": errors}
+    shortcuts = {platform: [{"language": t["language"], "query": t["query"], "url": platform_search_url(platform, t["query"])} for t in translations[:4]] for platform in ("tiktok", "instagram", "xiaohongshu", "youtube")}
+    return {"topic": topic, "translations": translations, "results": all_results, "shortcuts": shortcuts, "errors": errors}
 
 
 def discovery_job(job_id: str, req: DiscoverRequest) -> None:
@@ -565,3 +582,4 @@ def download(job_id: str):
 
 
 app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
+
