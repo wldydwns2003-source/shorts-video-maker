@@ -17,7 +17,7 @@ import yt_dlp
 import edge_tts
 
 ROOT = Path(__file__).parent.resolve()
-STATIC = ROOT / "static"
+STATIC = ROOT
 WORK = ROOT / "work"
 WORK.mkdir(exist_ok=True)
 
